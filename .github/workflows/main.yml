@@ -1,19 +1,28 @@
 name: Build EXE (Windows)
 
-on:
+'on':
   workflow_dispatch:
+  push:
+    branches: [ "main" ]
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python -m pip install --upgrade pip pyinstaller
-      - run: pyinstaller --onefile --clean --noconfirm --name CourierTargets courier_targets.py
-      - uses: actions/upload-artifact@v4
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Build onefile exe
+        run: pyinstaller --onefile --clean --noconfirm --name CourierTargets courier_targets.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: CourierTargets-exe
           path: dist/CourierTargets.exe
