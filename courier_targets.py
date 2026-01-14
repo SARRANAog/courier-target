@@ -10,6 +10,11 @@ NEG_RISK = 0.15
 TARGET_PERCENTS = [90, 93, 95, 96, 97, 98, 99, 100]
 EXTRA_PER_COURIER = 3
 
+# Размер окна (в символах)
+WINDOW_COLS = 92
+WINDOW_ROWS = 30
+WINDOW_TITLE = "Courier Ratings Targets"
+
 SCHEDULE_BY_DATE = {
     "2026-01-15": 5,
     "2026-01-16": 7,
@@ -31,22 +36,18 @@ SCHEDULE_BY_DATE = {
 }
 DEFAULT_COURIERS = 5
 
-# Window look (Windows only)
-WINDOW_TITLE = "Courier Ratings Targets"
-WINDOW_COLS = 88
-WINDOW_ROWS = 32
-WINDOW_X = 80
-WINDOW_Y = 60
-
 
 # -------------------------
-# Console window control (Windows)
+# Console window control (Windows, cmd/exe)
 # -------------------------
-def setup_console_window():
+def setup_console_window(cols: int, rows: int, title: str):
     """
-    Настройка окна консоли: заголовок, размер, положение.
-    Работает только в Windows и только в обычном консольном окне.
-    В IDE-терминалах может не сработать — это нормально.
+    Windows-only:
+    - ставит заголовок
+    - задаёт размер окна cols x rows (в символах)
+    - убирает скроллбар (буфер = окно)
+    - центрирует окно на экране
+    - включает ANSI-цвета (Virtual Terminal Processing)
     """
     if os.name != "nt":
         return
@@ -58,23 +59,87 @@ def setup_console_window():
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         user32 = ctypes.WinDLL("user32", use_last_error=True)
 
-        # Set title
-        kernel32.SetConsoleTitleW(wintypes.LPCWSTR(WINDOW_TITLE))
+        # --- types
+        class COORD(ctypes.Structure):
+            _fields_ = [("X", wintypes.SHORT), ("Y", wintypes.SHORT)]
 
-        # Resize console by columns/rows using "mode con"
-        # (самый надёжный способ без плясок с буфером)
-        os.system(f"mode con: cols={WINDOW_COLS} lines={WINDOW_ROWS}")
+        class SMALL_RECT(ctypes.Structure):
+            _fields_ = [("Left", wintypes.SHORT),
+                        ("Top", wintypes.SHORT),
+                        ("Right", wintypes.SHORT),
+                        ("Bottom", wintypes.SHORT)]
 
-        # Move window (if we can get the HWND)
+        class RECT(ctypes.Structure):
+            _fields_ = [("left", wintypes.LONG),
+                        ("top", wintypes.LONG),
+                        ("right", wintypes.LONG),
+                        ("bottom", wintypes.LONG)]
+
+        # --- constants
+        STD_OUTPUT_HANDLE = -11
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+
+        SWP_NOZORDER = 0x0004
+        SWP_NOSIZE = 0x0001
+
+        SM_CXSCREEN = 0
+        SM_CYSCREEN = 1
+
+        # --- set title
+        kernel32.SetConsoleTitleW(wintypes.LPCWSTR(title))
+
+        # --- handles
+        h_out = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        if h_out in (0, -1):
+            return
+
+        # --- enable ANSI (virtual terminal)
+        mode = wintypes.DWORD()
+        if kernel32.GetConsoleMode(h_out, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(h_out, wintypes.DWORD(mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+
+        # IMPORTANT:
+        # Чтобы убрать скроллбар, размер буфера = размер окна.
+        # Но SetConsoleScreenBufferSize не даст поставить буфер меньше текущего окна.
+        # Поэтому делаем так:
+        # 1) временно уменьшаем окно до минимального
+        # 2) ставим буфер под нужный
+        # 3) ставим окно под нужный
+        # 4) еще раз ставим буфер = окно (фикс скролла)
+
+        # 1) tiny window
+        tiny = SMALL_RECT(0, 0, 1, 1)
+        kernel32.SetConsoleWindowInfo(h_out, True, ctypes.byref(tiny))
+
+        # 2) set buffer
+        buf = COORD(cols, rows)
+        kernel32.SetConsoleScreenBufferSize(h_out, buf)
+
+        # 3) set window
+        win = SMALL_RECT(0, 0, cols - 1, rows - 1)
+        kernel32.SetConsoleWindowInfo(h_out, True, ctypes.byref(win))
+
+        # 4) ensure buffer == window (no scroll)
+        kernel32.SetConsoleScreenBufferSize(h_out, buf)
+
+        # --- center window on screen (pixel positioning)
         hwnd = kernel32.GetConsoleWindow()
         if hwnd:
-            SWP_NOZORDER = 0x0004
-            SWP_NOSIZE = 0x0001
-            # Сдвигаем в нужную точку, размер уже задан командой mode con
-            user32.SetWindowPos(hwnd, None, WINDOW_X, WINDOW_Y, 0, 0, SWP_NOZORDER | SWP_NOSIZE)
+            rect = RECT()
+            if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                win_w = rect.right - rect.left
+                win_h = rect.bottom - rect.top
+
+                scr_w = user32.GetSystemMetrics(SM_CXSCREEN)
+                scr_h = user32.GetSystemMetrics(SM_CYSCREEN)
+
+                x = max(0, (scr_w - win_w) // 2)
+                y = max(0, (scr_h - win_h) // 2)
+
+                user32.SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE)
 
     except Exception:
-        # Не валим скрипт, если окружение не даёт управлять окном
+        # не валим программу, если что-то не получилось (редко, но бывает в нестандартных хостах)
         return
 
 
@@ -83,7 +148,8 @@ def setup_console_window():
 # -------------------------
 def supports_ansi() -> bool:
     if not sys.stdout.isatty():
-        return False
+        # в exe/cmd обычно True, но оставим проверку
+        return False if os.name != "nt" else True
     if os.getenv("NO_COLOR"):
         return False
     return True
@@ -149,11 +215,7 @@ def pick_target(current_percent: float) -> int:
     return 100
 
 def min_positive_needed_strict(total: int, positive: int, target_percent: int):
-    """
-    Minimal x >= 0 such that:
-        100*(positive + x) > target*(total + x)
-    integer strict.
-    """
+    # 100*(positive+x) > target*(total+x)
     if target_percent >= 100:
         if positive == total:
             return 0
@@ -178,10 +240,6 @@ def build_day_plan(today: datetime.date):
     return out
 
 def allocate_weighted_total(total_needed: int, day_plan: list[tuple[datetime.date, int]]):
-    """
-    Distribute total_needed across days proportional to couriers count.
-    Returns dict date -> allocated base for day.
-    """
     if total_needed <= 0:
         return {d: 0 for d, _ in day_plan}
 
@@ -225,9 +283,8 @@ def allocate_weighted_total(total_needed: int, day_plan: list[tuple[datetime.dat
 # Program
 # -------------------------
 def calculate():
-    setup_console_window()
+    setup_console_window(WINDOW_COLS, WINDOW_ROWS, WINDOW_TITLE)
 
-    # Input phase
     print("=" * 60)
     print("ЦЕЛИ ПО ОЦЕНКАМ ДЛЯ КУРЬЕРОВ")
     print("=" * 60)
@@ -266,10 +323,9 @@ def calculate():
 
         final_total_needed = base_total_needed + extra_total
 
-        # Clean console after all inputs collected
+        # clean after inputs
         clear_console()
 
-        # Output
         print(bold(cyan("ОТЧЁТ ПО ЦЕЛЯМ")))
         print(gray("─" * 60))
 
@@ -289,8 +345,8 @@ def calculate():
         today_couriers = get_couriers_for_date(today)
         today_total_ratings = final_alloc.get(today, 0)
         today_per_courier = math.ceil(today_total_ratings / today_couriers) if today_couriers > 0 else 0
-
         badge = green("OK") if today_per_courier >= EXTRA_PER_COURIER else yellow("CHECK")
+
         today_lines = [
             f"{bold('Дата:')}                {today.isoformat()}",
             f"{bold('Курьеров:')}            {today_couriers}",
@@ -300,7 +356,12 @@ def calculate():
         print(box("Сегодня", today_lines))
 
         print(bold("План по дням (только рабочие дни)"))
-        header = f"{gray('Дата'.ljust(12))} {gray('Курьеров'.rjust(8))} {gray('Всего оценок'.rjust(12))} {gray('На курьера'.rjust(10))}"
+        header = (
+            f"{gray('Дата'.ljust(12))} "
+            f"{gray('Курьеров'.rjust(8))} "
+            f"{gray('Всего оценок'.rjust(12))} "
+            f"{gray('На курьера'.rjust(10))}"
+        )
         print(header)
         print(gray("─" * 60))
 
@@ -309,7 +370,6 @@ def calculate():
         for d, ccount in day_plan:
             if ccount <= 0:
                 continue
-
             day_total = final_alloc.get(d, 0)
             if day_total <= 0:
                 continue
