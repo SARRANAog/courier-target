@@ -10,7 +10,6 @@ NEG_RISK = 0.15
 TARGET_PERCENTS = [90, 93, 95, 96, 97, 98, 99, 100]
 EXTRA_PER_COURIER = 3
 
-# Размер окна (в символах)
 WINDOW_COLS = 92
 WINDOW_ROWS = 30
 WINDOW_TITLE = "Courier Ratings Targets"
@@ -41,14 +40,6 @@ DEFAULT_COURIERS = 5
 # Console window control (Windows, cmd/exe)
 # -------------------------
 def setup_console_window(cols: int, rows: int, title: str):
-    """
-    Windows-only:
-    - заголовок
-    - размер окна cols x rows (символы)
-    - убрать скроллбар (буфер = окно)
-    - центрирование
-    - включить ANSI (Virtual Terminal Processing)
-    """
     if os.name != "nt":
         return
 
@@ -123,7 +114,7 @@ def setup_console_window(cols: int, rows: int, title: str):
 
 
 # -------------------------
-# UI (ANSI) styling
+# UI (ANSI) styling + helpers
 # -------------------------
 def supports_ansi() -> bool:
     if os.getenv("NO_COLOR"):
@@ -141,7 +132,6 @@ def _c(s: str, code: str) -> str:
 
 def bold(s: str) -> str: return _c(s, "1")
 def dim(s: str) -> str: return _c(s, "2")
-def red(s: str) -> str: return _c(s, "31")
 def green(s: str) -> str: return _c(s, "32")
 def yellow(s: str) -> str: return _c(s, "33")
 def cyan(s: str) -> str: return _c(s, "36")
@@ -164,18 +154,32 @@ def strip_ansi(s: str) -> str:
         i += 1
     return "".join(out)
 
-def pad(s: str, w: int) -> str:
-    return s + " " * max(0, w - len(strip_ansi(s)))
+def pad(s: str, w: int, align: str = "left") -> str:
+    plain = strip_ansi(s)
+    if len(plain) >= w:
+        return s
+    spaces = " " * (w - len(plain))
+    return (spaces + s) if align == "right" else (s + spaces)
 
 def box(title: str, lines: list[str]) -> str:
     t = f" {title} "
-    w = max(len(strip_ansi(t)), *(len(strip_ansi(x)) for x in lines), 26)
+    w = max(len(strip_ansi(t)), *(len(strip_ansi(x)) for x in lines), 30)
     top = "┌" + "─" * (w + 2) + "┐"
     mid = "│ " + pad(t, w) + " │"
     sep = "├" + "─" * (w + 2) + "┤"
     body = "\n".join("│ " + pad(x, w) + " │" for x in lines)
     bot = "└" + "─" * (w + 2) + "┘"
     return "\n".join([top, mid, sep, body, bot])
+
+def center_line(s: str, width: int) -> str:
+    plain = strip_ansi(s)
+    if len(plain) >= width:
+        return s
+    left = (width - len(plain)) // 2
+    return (" " * left) + s
+
+def print_centered(s: str):
+    print(center_line(s, WINDOW_COLS))
 
 
 # -------------------------
@@ -193,12 +197,10 @@ def pick_target(current_percent: float) -> int:
     return 100
 
 def min_positive_needed_strict(total: int, positive: int, target_percent: int):
-    # 100*(positive+x) > target*(total+x)
     if target_percent >= 100:
         if positive == total:
             return 0
         return math.inf
-
     A = 100 - target_percent
     B = target_percent * total - 100 * positive
     if B < 0:
@@ -220,7 +222,6 @@ def build_day_plan(today: datetime.date):
 def allocate_weighted_total(total_needed: int, day_plan: list[tuple[datetime.date, int]]):
     if total_needed <= 0:
         return {d: 0 for d, _ in day_plan}
-
     weights = [(d, max(0, c)) for d, c in day_plan]
     total_weight = sum(w for _, w in weights)
     if total_weight == 0:
@@ -256,28 +257,14 @@ def allocate_weighted_total(total_needed: int, day_plan: list[tuple[datetime.dat
 
     return alloc
 
-def per_courier_split(total_ratings: int, couriers: int) -> tuple[int, int]:
-    """
-    Возвращает (base, extra_count):
-    base — минимум на каждого
-    extra_count — сколько курьеров получат +1 (чтобы сумма сошлась ровно)
-    Пример: total=22, couriers=5 => base=4, extra=2 (двое по 5, трое по 4)
-    """
-    if couriers <= 0:
-        return 0, 0
+def per_courier_text(total_ratings: int, couriers: int) -> str:
+    if couriers <= 0 or total_ratings <= 0:
+        return "0"
     base = total_ratings // couriers
     extra = total_ratings % couriers
-    return base, extra
-
-def per_courier_text(total_ratings: int, couriers: int) -> str:
-    base, extra = per_courier_split(total_ratings, couriers)
-    if couriers <= 0:
-        return "0"
-    if total_ratings <= 0:
-        return "0"
     if extra == 0:
         return f"{base}"
-    return f"{base} (+1 для {extra})"
+    return f"{base} (+1×{extra})"
 
 
 # -------------------------
@@ -313,7 +300,6 @@ def calculate():
         day_plan = build_day_plan(today)
         base_alloc = allocate_weighted_total(base_total_needed, day_plan)
 
-        # Add +3 per courier per day
         final_alloc = {}
         extra_total = 0
         for d, ccount in day_plan:
@@ -324,21 +310,36 @@ def calculate():
 
         final_total_needed = base_total_needed + extra_total
 
-        # clean after inputs
+        # Today summary numbers
+        today_couriers = get_couriers_for_date(today)
+        today_total = final_alloc.get(today, 0)
+        today_pc = per_courier_text(today_total, today_couriers)
+
         clear_console()
 
-        print(bold(cyan("ОТЧЁТ ПО ЦЕЛЯМ")))
+        # Centered title
+        print_centered(bold(cyan("ОТЧЁТ ПО ЦЕЛЯМ")))
         print(gray("─" * 60))
 
-        # NEW: верхний бокс "как ты просил"
-        top_lines = [
-            f"{bold('Оценок всего:')}        {total}",
-            f"{bold('Положительных оценок:')} {positive}",
-            f"{bold('Текущий процент:')}     {current_percent:.2f}%",
-            f"{bold('Цель:')}               > {target}%",
+        # One combined box "Главное" (как ты попросил)
+        main_lines = [
+            f"{bold('Оценок всего:')}            {total}",
+            f"{bold('Положительных оценок:')}    {positive}",
+            f"{bold('Текущий процент:')}         {current_percent:.2f}%",
+            f"{bold('Цель:')}                   > {target}%",
+            gray("────────────────────────────"),
+            f"{bold('Дата:')}                   {today.isoformat()}",
+            f"{bold('Курьеров сегодня:')}        {today_couriers}",
+            f"{bold('Оценок за день:')}          {today_total}",
+            f"{bold('Оценок на курьера:')}       {today_pc}",
         ]
-        print(box("Текущие данные", top_lines))
+        # Центрируем сам бокс по ширине окна (вставляем отступ слева)
+        b = box("Главное", main_lines)
+        left_pad = max(0, (WINDOW_COLS - max(len(line) for line in b.splitlines())) // 2)
+        pad_prefix = " " * left_pad
+        print("\n".join(pad_prefix + line for line in b.splitlines()))
 
+        # Plan box
         status_lines = [
             f"{bold('Риск:')}  {int(NEG_RISK*100)}% (запас)",
             f"{bold('Плюс:')}  +{EXTRA_PER_COURIER} оценки на курьера/день",
@@ -348,57 +349,61 @@ def calculate():
             f"{bold('Дополнительно из-за +3:')} {extra_total}",
             f"{bold('ИТОГО план всего оценок:')} {final_total_needed}",
         ]
-        print(box("План", status_lines))
+        pb = box("План", status_lines)
+        left_pad2 = max(0, (WINDOW_COLS - max(len(line) for line in pb.splitlines())) // 2)
+        pad_prefix2 = " " * left_pad2
+        print("\n".join(pad_prefix2 + line for line in pb.splitlines()))
 
-        # Today box with correct per-courier split
-        today_couriers = get_couriers_for_date(today)
-        today_total_ratings = final_alloc.get(today, 0)
-        pc_text = per_courier_text(today_total_ratings, today_couriers)
-        badge = green("OK") if today_total_ratings > 0 else yellow("CHECK")
+        # Table (fixed columns, ровная)
+        print()
+        print_centered(bold("План по дням (только рабочие дни)"))
 
-        today_lines = [
-            f"{bold('Дата:')}                 {today.isoformat()}",
-            f"{bold('Курьеров:')}             {today_couriers}",
-            f"{bold('Всего оценок:')}         {today_total_ratings}",
-            f"{bold('Оценок на курьера:')}    {pc_text}  {dim(f'({badge})')}",
-        ]
-        print(box("Сегодня", today_lines))
+        W_DATE = 12
+        W_MARK = 2
+        W_COUR = 8
+        W_TOTAL = 12
+        W_PC = 14
 
-        # Table (only working days)
-        print(bold("План по дням (только рабочие дни)"))
         header = (
-            f"{gray('Дата'.ljust(12))} "
-            f"{gray('Курьеров'.rjust(8))} "
-            f"{gray('Всего оценок'.rjust(12))} "
-            f"{gray('Оценок/кур'.rjust(14))}"
+            pad(gray("Дата"), W_DATE, "left") +
+            pad(gray(""), W_MARK, "left") +
+            pad(gray("Курьеров"), W_COUR, "right") + " " +
+            pad(gray("Оценок/день"), W_TOTAL, "right") + " " +
+            pad(gray("Оценок/кур"), W_PC, "right")
         )
         print(header)
         print(gray("─" * 60))
 
-        shown = 0
         dist_sum = 0
+        shown = 0
         for d, ccount in day_plan:
             if ccount <= 0:
                 continue
-
             day_total = final_alloc.get(d, 0)
             if day_total <= 0:
                 continue
 
-            dist_sum += day_total
             shown += 1
+            dist_sum += day_total
 
             mark = cyan("•") if d == today else " "
-            pc = per_courier_text(day_total, ccount)
-            print(f"{d.isoformat():<12} {mark} {ccount:>8} {day_total:>12} {pc:>14}")
+            pc_txt = per_courier_text(day_total, ccount)
+
+            row = (
+                pad(d.isoformat(), W_DATE, "left") +
+                pad(mark, W_MARK, "left") +
+                pad(str(ccount), W_COUR, "right") + " " +
+                pad(str(day_total), W_TOTAL, "right") + " " +
+                pad(pc_txt, W_PC, "right")
+            )
+            print(row)
 
         if shown == 0:
             print(dim("Нет рабочих дней с задачами (возможно, цель уже достигнута)."))
 
         print(gray("─" * 60))
-        ok = (dist_sum == final_total_needed)
-        ctrl = green("СХОДИТСЯ") if ok else red("НЕ СХОДИТСЯ")
-        print(f"{bold('Контроль:')} распределено {dist_sum} из {final_total_needed} → {ctrl}")
+        ctrl = green("СХОДИТСЯ") if dist_sum == final_total_needed else yellow("ПРОВЕРЬ")
+        print_centered(f"{bold('Контроль:')} распределено {dist_sum} из {final_total_needed} → {ctrl}")
 
     except ValueError:
         print("Ошибка: введи числа.")
