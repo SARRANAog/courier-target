@@ -10,9 +10,9 @@ NEG_RISK = 0.15
 TARGET_PERCENTS = [90, 93, 95, 96, 97, 98, 99, 100]
 EXTRA_PER_COURIER = 3
 
-# ВАЖНО: без скроллбара вывод должен помещаться в высоту окна
-WINDOW_COLS = 92
-WINDOW_ROWS = 56
+# Окно делаем побольше
+WINDOW_COLS = 110
+WINDOW_ROWS = 45
 WINDOW_TITLE = "Courier Ratings Targets"
 
 SCHEDULE_BY_DATE = {
@@ -44,10 +44,10 @@ def setup_console_window(cols: int, rows: int, title: str):
     """
     Windows-only:
     - заголовок
-    - размер окна cols x rows (символы)
-    - убрать скроллбар (буфер = окно)
-    - центрирование
+    - размер окна (cols x rows)
+    - центрирование окна
     - включить ANSI
+    ВАЖНО: НЕ трогаем buffer -> скролл доступен, ничего не режется.
     """
     if os.name != "nt":
         return
@@ -58,15 +58,6 @@ def setup_console_window(cols: int, rows: int, title: str):
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         user32 = ctypes.WinDLL("user32", use_last_error=True)
-
-        class COORD(ctypes.Structure):
-            _fields_ = [("X", wintypes.SHORT), ("Y", wintypes.SHORT)]
-
-        class SMALL_RECT(ctypes.Structure):
-            _fields_ = [("Left", wintypes.SHORT),
-                        ("Top", wintypes.SHORT),
-                        ("Right", wintypes.SHORT),
-                        ("Bottom", wintypes.SHORT)]
 
         class RECT(ctypes.Structure):
             _fields_ = [("left", wintypes.LONG),
@@ -85,27 +76,17 @@ def setup_console_window(cols: int, rows: int, title: str):
 
         kernel32.SetConsoleTitleW(wintypes.LPCWSTR(title))
 
-        h_out = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
-        if h_out in (0, -1):
-            return
+        # set size via mode con (не трогает буфер напрямую)
+        os.system(f"mode con: cols={cols} lines={rows}")
 
         # enable ANSI
-        mode = wintypes.DWORD()
-        if kernel32.GetConsoleMode(h_out, ctypes.byref(mode)):
-            kernel32.SetConsoleMode(h_out, wintypes.DWORD(mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+        h_out = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        if h_out not in (0, -1):
+            mode = wintypes.DWORD()
+            if kernel32.GetConsoleMode(h_out, ctypes.byref(mode)):
+                kernel32.SetConsoleMode(h_out, wintypes.DWORD(mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING))
 
-        # remove scrollbar: buffer == window
-        tiny = SMALL_RECT(0, 0, 1, 1)
-        kernel32.SetConsoleWindowInfo(h_out, True, ctypes.byref(tiny))
-
-        buf = COORD(cols, rows)
-        kernel32.SetConsoleScreenBufferSize(h_out, buf)
-
-        win = SMALL_RECT(0, 0, cols - 1, rows - 1)
-        kernel32.SetConsoleWindowInfo(h_out, True, ctypes.byref(win))
-        kernel32.SetConsoleScreenBufferSize(h_out, buf)
-
-        # center
+        # center window
         hwnd = kernel32.GetConsoleWindow()
         if hwnd:
             rect = RECT()
@@ -184,6 +165,10 @@ def print_centered_line(s: str):
     left = max(0, (WINDOW_COLS - len(plain)) // 2)
     print((" " * left) + s)
 
+def line_hr(char: str = "─"):
+    # красивая разделительная линия в ширину окна
+    print(gray(char * min(WINDOW_COLS, 140)))
+
 def box_lines(title: str, lines: list[str]) -> list[str]:
     t = f" {title} "
     w = max(len(strip_ansi(t)), *(len(strip_ansi(x)) for x in lines), 30)
@@ -210,7 +195,6 @@ def pick_target(current_percent: float) -> int:
     return 100
 
 def min_positive_needed_strict(total: int, positive: int, target_percent: int):
-    # 100*(positive+x) > target*(total+x)
     if target_percent >= 100:
         if positive == total:
             return 0
@@ -282,10 +266,10 @@ def per_courier_text(total_ratings: int, couriers: int) -> str:
 
 
 # -------------------------
-# Table rendering (centered, closed box)
+# Table rendering (boxed + centered)
 # -------------------------
 def build_table_box(day_plan, final_alloc, today: datetime.date) -> list[str]:
-    # Column widths (content only)
+    # Column widths
     W_DATE = 10
     W_MARK = 1
     W_COUR = 7
@@ -295,8 +279,7 @@ def build_table_box(day_plan, final_alloc, today: datetime.date) -> list[str]:
     def cell(text: str, w: int, align: str):
         return pad(text, w, align)
 
-    # Build header row
-    h = (
+    header = (
         "│ " +
         cell("Дата", W_DATE, "left") + " " +
         cell("", W_MARK, "left") + " │ " +
@@ -304,16 +287,13 @@ def build_table_box(day_plan, final_alloc, today: datetime.date) -> list[str]:
         cell("Оценок/день", W_DAY, "right") + " │ " +
         cell("Оценок/кур", W_PC, "right") + " │"
     )
-    inner_width = len(strip_ansi(h)) - 2  # without outer '│' and last '│'? (we build borders separately anyway)
 
-    top = "┌" + "─" * (len(strip_ansi(h)) - 2) + "┐"
-    mid = "├" + "─" * (len(strip_ansi(h)) - 2) + "┤"
-    bot = "└" + "─" * (len(strip_ansi(h)) - 2) + "┘"
+    width = len(strip_ansi(header)) - 2
+    top = "┌" + "─" * width + "┐"
+    mid = "├" + "─" * width + "┤"
+    bot = "└" + "─" * width + "┘"
 
-    rows = []
-    rows.append(top)
-    rows.append(h)
-    rows.append(mid)
+    rows = [top, header, mid]
 
     any_rows = False
     for d, ccount in day_plan:
@@ -322,11 +302,10 @@ def build_table_box(day_plan, final_alloc, today: datetime.date) -> list[str]:
         day_total = final_alloc.get(d, 0)
         if day_total <= 0:
             continue
-
         any_rows = True
+
         mark = cyan("•") if d == today else " "
         pc_txt = per_courier_text(day_total, ccount)
-
         r = (
             "│ " +
             cell(d.isoformat(), W_DATE, "left") + " " +
@@ -338,7 +317,8 @@ def build_table_box(day_plan, final_alloc, today: datetime.date) -> list[str]:
         rows.append(r)
 
     if not any_rows:
-        r = "│ " + pad(dim("Нет рабочих дней с задачами."), len(strip_ansi(h)) - 4, "left") + " │"
+        msg = dim("Нет рабочих дней с задачами.")
+        r = "│ " + pad(msg, width - 2, "left") + " │"
         rows.append(r)
 
     rows.append(bot)
@@ -394,11 +374,9 @@ def calculate():
 
         clear_console()
 
-        # Title
         print_centered_line(bold(cyan("ОТЧЁТ ПО ЦЕЛЯМ")))
-        print(gray("─" * 60))
+        line_hr()
 
-        # Main box (combined)
         main_lines = [
             f"{bold('Оценок всего:')}            {total}",
             f"{bold('Положительных оценок:')}    {positive}",
@@ -414,7 +392,6 @@ def calculate():
         for line in center_block(main_box, WINDOW_COLS):
             print(line)
 
-        # Plan box (короче, чтобы влезало)
         plan_lines = [
             f"{bold('План всего оценок (с запасом):')} {base_total_needed}",
             f"{bold('Дополнительно из-за +3:')}         {extra_total}",
@@ -430,10 +407,11 @@ def calculate():
         for line in center_block(table_lines, WINDOW_COLS):
             print(line)
 
+        line_hr()
+
         dist_sum = sum(final_alloc.get(d, 0) for d, c in day_plan if c > 0 and final_alloc.get(d, 0) > 0)
         ok = (dist_sum == final_total_needed)
         ctrl = green("СХОДИТСЯ") if ok else yellow("ПРОВЕРЬ")
-        print()
         print_centered_line(f"{bold('Контроль:')} распределено {dist_sum} из {final_total_needed} → {ctrl}")
 
     except ValueError:
@@ -441,7 +419,7 @@ def calculate():
     except Exception as e:
         print(f"Ошибка: {e}")
 
-    print("\n" + gray("─" * 60))
+    print("\n" + gray("─" * min(WINDOW_COLS, 140)))
     input("Enter для выхода...")
 
 
