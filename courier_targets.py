@@ -1,13 +1,11 @@
 import datetime
 import math
+import os
+import platform
 
-NEG_RISK = 0.15  # фикс 15% "на всякий случай"
+NEG_RISK = 0.15
 TARGET_PERCENTS = [90, 93, 95, 96, 97, 98, 99, 100]
 
-# ==========================================================
-# ГРАФИК КУРЬЕРОВ (дата -> количество курьеров)
-# Формат ключей: "YYYY-MM-DD"
-# ==========================================================
 SCHEDULE_BY_DATE = {
     "2026-01-15": 5,
     "2026-01-16": 7,
@@ -28,8 +26,12 @@ SCHEDULE_BY_DATE = {
     "2026-01-31": 6,
 }
 
-# Если для какой-то даты нет записи — берём это значение.
 DEFAULT_COURIERS = 5
+
+
+def clear_console():
+    # Windows: cls, Linux/Mac: clear
+    os.system("cls" if os.name == "nt" else "clear")
 
 
 def last_day_of_month(d: datetime.date) -> datetime.date:
@@ -49,12 +51,12 @@ def min_positive_needed_strict(total: int, positive: int, target_percent: int):
     """
     Минимальное x >= 0, чтобы:
         100*(positive + x) > target_percent*(total + x)
-    Считаем строго ">" и целыми числами.
+    Строго ">" и только целые.
     """
     if target_percent >= 100:
         if positive == total:
             return 0
-        return math.inf  # 100% недостижимо, если уже есть негатив
+        return math.inf
 
     A = 100 - target_percent
     B = target_percent * total - 100 * positive
@@ -62,52 +64,36 @@ def min_positive_needed_strict(total: int, positive: int, target_percent: int):
     if B < 0:
         return 0
 
-    # A*x > B  =>  x = floor(B/A) + 1
     return (B // A) + 1
 
 
 def get_couriers_for_date(d: datetime.date) -> int:
-    key = d.isoformat()
-    val = SCHEDULE_BY_DATE.get(key, DEFAULT_COURIERS)
-    if val is None:
-        val = DEFAULT_COURIERS
-    return int(val)
+    return int(SCHEDULE_BY_DATE.get(d.isoformat(), DEFAULT_COURIERS))
 
 
 def build_day_plan(today: datetime.date):
     end = last_day_of_month(today)
-    days = []
+    out = []
     cur = today
     while cur <= end:
-        c = get_couriers_for_date(cur)
-        days.append((cur, c))
+        out.append((cur, get_couriers_for_date(cur)))
         cur += datetime.timedelta(days=1)
-    return days
+    return out
 
 
 def allocate_weighted_total(total_needed: int, day_plan: list):
     """
-    Распределяем total_needed по дням пропорционально количеству курьеров.
-    day_plan: [(date, couriers_count), ...]
-    Возвращает dict: date -> allocated_total_for_day (int)
+    Распределяем total_needed по дням пропорционально числу курьеров.
+    Возвращает dict date -> allocated_total_for_day
     """
     if total_needed <= 0:
         return {d: 0 for d, _ in day_plan}
 
-    weights = []
-    for d, c in day_plan:
-        if c <= 0:
-            # 0 курьеров => 0 веса
-            weights.append((d, 0))
-        else:
-            weights.append((d, c))
-
+    weights = [(d, max(0, c)) for d, c in day_plan]
     total_weight = sum(w for _, w in weights)
     if total_weight == 0:
-        # некому работать — распределять некуда
         return {d: 0 for d, _ in day_plan}
 
-    # Сначала берём "пол"
     alloc = {}
     remainders = []
     allocated_sum = 0
@@ -122,7 +108,6 @@ def allocate_weighted_total(total_needed: int, day_plan: list):
         allocated_sum += base
         remainders.append((d, exact - base))
 
-    # Докидываем остаток по наибольшим дробным частям
     remaining = total_needed - allocated_sum
     remainders.sort(key=lambda x: x[1], reverse=True)
 
@@ -133,7 +118,6 @@ def allocate_weighted_total(total_needed: int, day_plan: list):
         remaining -= 1
         i += 1
 
-    # Если всё ещё остался остаток (теоретически редко), докидываем по кругу
     i = 0
     while remaining > 0 and remainders:
         d, _ = remainders[i % len(remainders)]
@@ -144,78 +128,109 @@ def allocate_weighted_total(total_needed: int, day_plan: list):
     return alloc
 
 
+def fmt_int(n: int) -> str:
+    return f"{n:d}"
+
+
+def print_header(title: str):
+    print("\n" + title)
+    print("-" * len(title))
+
+
 def calculate():
-    print("=" * 70)
-    print("РАСЧЕТ ЦЕЛЕЙ ДЛЯ КУРЬЕРОВ (по дням, по количеству курьеров)")
-    print("=" * 70)
+    print("=" * 60)
+    print("ЦЕЛИ ПО ОЦЕНКАМ ДЛЯ КУРЬЕРОВ")
+    print("=" * 60)
 
     try:
-        total = int(input("Сколько всего оценок сейчас: ").strip())
-        positive = int(input("Сколько из них положительных: ").strip())
+        total = int(input("Всего оценок сейчас: ").strip())
+        positive = int(input("Положительных из них: ").strip())
 
         if total < 0 or positive < 0 or positive > total:
-            print("Ошибка: positive должно быть в диапазоне [0..total].")
+            print("Ошибка: positive должен быть в диапазоне [0..total].")
             return
 
         current_percent = (positive / total * 100) if total > 0 else 0.0
         target = pick_target(current_percent)
 
-        # Если цель 100% недостижима (есть негатив), не даём скрипту уходить в тупик
+        # 100% недостижимо при наличии негатива — автосдвиг на 99
         if target == 100 and positive < total:
-            target = 99  # разумная автозамена
+            target = 99
 
         needed_positive = min_positive_needed_strict(total, positive, target)
         if needed_positive is math.inf:
-            print("\nЦель 100% недостижима, пока уже есть негативные оценки.")
+            print("Цель 100% недостижима при наличии негатива.")
             return
 
-        # С запасом 15% считаем, сколько ВСЕГО оценок надо собрать,
-        # чтобы "ожидаемо" набрать needed_positive позитивных
         total_needed = 0 if needed_positive == 0 else math.ceil(needed_positive / (1.0 - NEG_RISK))
 
         today = datetime.date.today()
-        day_plan = build_day_plan(today)  # [(date, couriers_count), ...]
-
-        # Валидация: курьеров >= 1 в рабочих днях
-        # Если где-то 0 — просто выдадим 0 задач на этот день
+        day_plan = build_day_plan(today)
         allocated_by_day = allocate_weighted_total(total_needed, day_plan)
 
-        print("\n" + "-" * 70)
-        print(f"Текущий процент: {current_percent:.2f}%  ({positive}/{total})")
-        print(f"Цель: > {target}%")
-        print(f"Нужно позитивных минимум: {needed_positive}")
-        print(f"Запас на негатив: {int(NEG_RISK*100)}%")
-        print(f"Итого оценок собрать (с запасом): {total_needed}")
-        print("-" * 70)
+        # после ввода всех данных — чистим консоль
+        clear_console()
 
-        print("\n" + "=" * 70)
-        print("ПЛАН ПО ДНЯМ")
-        print("=" * 70)
+        # ======= СТИЛИЗОВАННЫЙ ВЫВОД =======
 
-        total_check = 0
+        # Сводка
+        print("=" * 60)
+        print("РЕЗУЛЬТАТ")
+        print("=" * 60)
+
+        print_header("Сводка")
+        print(f"Сейчас: {positive}/{total} = {current_percent:.2f}%")
+        print(f"Цель:  > {target}%")
+        print(f"Риск:  {int(NEG_RISK*100)}% (запас)")
+        print(f"Нужно позитивных минимум: {fmt_int(needed_positive)}")
+        print(f"Собрать всего оценок:     {fmt_int(total_needed)}")
+
+        # Сегодня
+        today_couriers = get_couriers_for_date(today)
+        today_total = allocated_by_day.get(today, 0)
+        today_per = math.ceil(today_total / today_couriers) if today_couriers > 0 and today_total > 0 else 0
+
+        print_header("Сегодня")
+        print(f"Дата:     {today.isoformat()}")
+        print(f"Курьеров: {fmt_int(today_couriers)}")
+        print(f"Всего:    {fmt_int(today_total)}")
+        print(f"На 1:     {fmt_int(today_per)}")
+
+        # План по дням (только где есть курьеры и есть задача)
+        print_header("План по дням (только рабочие)")
+        # Заголовок колонок
+        print(f"{'Дата':<12} {'Курьеров':>8} {'Всего':>8} {'На 1':>8}")
+        print(f"{'-'*12} {'-'*8:>8} {'-'*8:>8} {'-'*8:>8}")
+
+        shown = 0
+        distributed_sum = 0
         for d, c in day_plan:
             day_total = allocated_by_day.get(d, 0)
-            total_check += day_total
-
             if c <= 0:
-                per_courier = 0
-            else:
-                per_courier = math.ceil(day_total / c) if day_total > 0 else 0
+                continue
+            if day_total <= 0:
+                # убираем “воду”: не показываем нулевые задачи
+                continue
 
-            mark = " (СЕГОДНЯ)" if d == today else ""
-            print(f"{d.isoformat()}{mark}: курьеров {c} | всего {day_total} | на 1 курьера {per_courier}")
+            per = math.ceil(day_total / c)
+            distributed_sum += day_total
+            shown += 1
+            marker = "*" if d == today else " "
+            print(f"{d.isoformat():<12}{marker} {c:>8} {day_total:>8} {per:>8}")
 
-        print("\n" + "-" * 70)
-        print(f"Проверка суммы: распределено {total_check} из {total_needed}")
-        print("-" * 70)
+        if shown == 0:
+            print("(Нет рабочих дней с задачами — либо уже всё достигнуто, либо total_needed=0.)")
+
+        print_header("Контроль")
+        print(f"Распределено: {fmt_int(distributed_sum)} из {fmt_int(total_needed)}")
 
     except ValueError:
-        print("Ошибка: где-то введено не число.")
+        print("Ошибка: введи числа.")
     except Exception as e:
         print(f"Ошибка: {e}")
 
-    print("\n" + "=" * 70)
-    input("Нажмите Enter для выхода...")
+    print("\n" + "=" * 60)
+    input("Enter для выхода...")
 
 
 def main():
