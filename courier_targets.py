@@ -43,11 +43,11 @@ DEFAULT_COURIERS = 5
 def setup_console_window(cols: int, rows: int, title: str):
     """
     Windows-only:
-    - ставит заголовок
-    - задаёт размер окна cols x rows (в символах)
-    - убирает скроллбар (буфер = окно)
-    - центрирует окно на экране
-    - включает ANSI-цвета (Virtual Terminal Processing)
+    - заголовок
+    - размер окна cols x rows (символы)
+    - убрать скроллбар (буфер = окно)
+    - центрирование
+    - включить ANSI (Virtual Terminal Processing)
     """
     if os.name != "nt":
         return
@@ -59,7 +59,6 @@ def setup_console_window(cols: int, rows: int, title: str):
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         user32 = ctypes.WinDLL("user32", use_last_error=True)
 
-        # --- types
         class COORD(ctypes.Structure):
             _fields_ = [("X", wintypes.SHORT), ("Y", wintypes.SHORT)]
 
@@ -75,7 +74,6 @@ def setup_console_window(cols: int, rows: int, title: str):
                         ("right", wintypes.LONG),
                         ("bottom", wintypes.LONG)]
 
-        # --- constants
         STD_OUTPUT_HANDLE = -11
         ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
 
@@ -85,61 +83,42 @@ def setup_console_window(cols: int, rows: int, title: str):
         SM_CXSCREEN = 0
         SM_CYSCREEN = 1
 
-        # --- set title
         kernel32.SetConsoleTitleW(wintypes.LPCWSTR(title))
 
-        # --- handles
         h_out = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
         if h_out in (0, -1):
             return
 
-        # --- enable ANSI (virtual terminal)
+        # enable ANSI
         mode = wintypes.DWORD()
         if kernel32.GetConsoleMode(h_out, ctypes.byref(mode)):
             kernel32.SetConsoleMode(h_out, wintypes.DWORD(mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING))
 
-        # IMPORTANT:
-        # Чтобы убрать скроллбар, размер буфера = размер окна.
-        # Но SetConsoleScreenBufferSize не даст поставить буфер меньше текущего окна.
-        # Поэтому делаем так:
-        # 1) временно уменьшаем окно до минимального
-        # 2) ставим буфер под нужный
-        # 3) ставим окно под нужный
-        # 4) еще раз ставим буфер = окно (фикс скролла)
-
-        # 1) tiny window
+        # remove scrollbar: buffer == window
         tiny = SMALL_RECT(0, 0, 1, 1)
         kernel32.SetConsoleWindowInfo(h_out, True, ctypes.byref(tiny))
 
-        # 2) set buffer
         buf = COORD(cols, rows)
         kernel32.SetConsoleScreenBufferSize(h_out, buf)
 
-        # 3) set window
         win = SMALL_RECT(0, 0, cols - 1, rows - 1)
         kernel32.SetConsoleWindowInfo(h_out, True, ctypes.byref(win))
-
-        # 4) ensure buffer == window (no scroll)
         kernel32.SetConsoleScreenBufferSize(h_out, buf)
 
-        # --- center window on screen (pixel positioning)
+        # center
         hwnd = kernel32.GetConsoleWindow()
         if hwnd:
             rect = RECT()
             if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
                 win_w = rect.right - rect.left
                 win_h = rect.bottom - rect.top
-
                 scr_w = user32.GetSystemMetrics(SM_CXSCREEN)
                 scr_h = user32.GetSystemMetrics(SM_CYSCREEN)
-
                 x = max(0, (scr_w - win_w) // 2)
                 y = max(0, (scr_h - win_h) // 2)
-
                 user32.SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE)
 
     except Exception:
-        # не валим программу, если что-то не получилось (редко, но бывает в нестандартных хостах)
         return
 
 
@@ -147,12 +126,11 @@ def setup_console_window(cols: int, rows: int, title: str):
 # UI (ANSI) styling
 # -------------------------
 def supports_ansi() -> bool:
-    if not sys.stdout.isatty():
-        # в exe/cmd обычно True, но оставим проверку
-        return False if os.name != "nt" else True
     if os.getenv("NO_COLOR"):
         return False
-    return True
+    if os.name == "nt":
+        return True
+    return sys.stdout.isatty()
 
 ANSI = supports_ansi()
 
@@ -191,7 +169,7 @@ def pad(s: str, w: int) -> str:
 
 def box(title: str, lines: list[str]) -> str:
     t = f" {title} "
-    w = max(len(strip_ansi(t)), *(len(strip_ansi(x)) for x in lines), 24)
+    w = max(len(strip_ansi(t)), *(len(strip_ansi(x)) for x in lines), 26)
     top = "┌" + "─" * (w + 2) + "┐"
     mid = "│ " + pad(t, w) + " │"
     sep = "├" + "─" * (w + 2) + "┤"
@@ -278,6 +256,29 @@ def allocate_weighted_total(total_needed: int, day_plan: list[tuple[datetime.dat
 
     return alloc
 
+def per_courier_split(total_ratings: int, couriers: int) -> tuple[int, int]:
+    """
+    Возвращает (base, extra_count):
+    base — минимум на каждого
+    extra_count — сколько курьеров получат +1 (чтобы сумма сошлась ровно)
+    Пример: total=22, couriers=5 => base=4, extra=2 (двое по 5, трое по 4)
+    """
+    if couriers <= 0:
+        return 0, 0
+    base = total_ratings // couriers
+    extra = total_ratings % couriers
+    return base, extra
+
+def per_courier_text(total_ratings: int, couriers: int) -> str:
+    base, extra = per_courier_split(total_ratings, couriers)
+    if couriers <= 0:
+        return "0"
+    if total_ratings <= 0:
+        return "0"
+    if extra == 0:
+        return f"{base}"
+    return f"{base} (+1 для {extra})"
+
 
 # -------------------------
 # Program
@@ -293,7 +294,7 @@ def calculate():
         total = int(input("Всего оценок сейчас: ").strip())
         positive = int(input("Положительных из них: ").strip())
         if total < 0 or positive < 0 or positive > total:
-            print("Ошибка: positive должен быть в диапазоне [0..total].")
+            print("Ошибка: положительные должны быть в диапазоне [0..всего].")
             return
 
         current_percent = (positive / total * 100) if total > 0 else 0.0
@@ -329,9 +330,16 @@ def calculate():
         print(bold(cyan("ОТЧЁТ ПО ЦЕЛЯМ")))
         print(gray("─" * 60))
 
+        # NEW: верхний бокс "как ты просил"
+        top_lines = [
+            f"{bold('Оценок всего:')}        {total}",
+            f"{bold('Положительных оценок:')} {positive}",
+            f"{bold('Текущий процент:')}     {current_percent:.2f}%",
+            f"{bold('Цель:')}               > {target}%",
+        ]
+        print(box("Текущие данные", top_lines))
+
         status_lines = [
-            f"{bold('Сейчас:')} {positive}/{total} = {current_percent:.2f}%",
-            f"{bold('Цель:')}  > {target}%",
             f"{bold('Риск:')}  {int(NEG_RISK*100)}% (запас)",
             f"{bold('Плюс:')}  +{EXTRA_PER_COURIER} оценки на курьера/день",
             "",
@@ -340,27 +348,29 @@ def calculate():
             f"{bold('Дополнительно из-за +3:')} {extra_total}",
             f"{bold('ИТОГО план всего оценок:')} {final_total_needed}",
         ]
-        print(box("Сводка", status_lines))
+        print(box("План", status_lines))
 
+        # Today box with correct per-courier split
         today_couriers = get_couriers_for_date(today)
         today_total_ratings = final_alloc.get(today, 0)
-        today_per_courier = math.ceil(today_total_ratings / today_couriers) if today_couriers > 0 else 0
-        badge = green("OK") if today_per_courier >= EXTRA_PER_COURIER else yellow("CHECK")
+        pc_text = per_courier_text(today_total_ratings, today_couriers)
+        badge = green("OK") if today_total_ratings > 0 else yellow("CHECK")
 
         today_lines = [
-            f"{bold('Дата:')}                {today.isoformat()}",
-            f"{bold('Курьеров:')}            {today_couriers}",
-            f"{bold('Всего оценок:')}        {today_total_ratings}",
-            f"{bold('Оценок на курьера:')}   {today_per_courier}  {dim(f'({badge})')}",
+            f"{bold('Дата:')}                 {today.isoformat()}",
+            f"{bold('Курьеров:')}             {today_couriers}",
+            f"{bold('Всего оценок:')}         {today_total_ratings}",
+            f"{bold('Оценок на курьера:')}    {pc_text}  {dim(f'({badge})')}",
         ]
         print(box("Сегодня", today_lines))
 
+        # Table (only working days)
         print(bold("План по дням (только рабочие дни)"))
         header = (
             f"{gray('Дата'.ljust(12))} "
             f"{gray('Курьеров'.rjust(8))} "
             f"{gray('Всего оценок'.rjust(12))} "
-            f"{gray('На курьера'.rjust(10))}"
+            f"{gray('Оценок/кур'.rjust(14))}"
         )
         print(header)
         print(gray("─" * 60))
@@ -370,16 +380,17 @@ def calculate():
         for d, ccount in day_plan:
             if ccount <= 0:
                 continue
+
             day_total = final_alloc.get(d, 0)
             if day_total <= 0:
                 continue
 
-            per = math.ceil(day_total / ccount)
             dist_sum += day_total
             shown += 1
 
             mark = cyan("•") if d == today else " "
-            print(f"{d.isoformat():<12} {mark} {ccount:>8} {day_total:>12} {per:>10}")
+            pc = per_courier_text(day_total, ccount)
+            print(f"{d.isoformat():<12} {mark} {ccount:>8} {day_total:>12} {pc:>14}")
 
         if shown == 0:
             print(dim("Нет рабочих дней с задачами (возможно, цель уже достигнута)."))
