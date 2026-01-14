@@ -1,11 +1,17 @@
 import datetime
 import math
 import os
-import platform
+import sys
 
 NEG_RISK = 0.15
 TARGET_PERCENTS = [90, 93, 95, 96, 97, 98, 99, 100]
 
+# +3 к каждому курьеру в день (как ты сказал)
+EXTRA_PER_COURIER = 3
+
+# ==========================================================
+# ГРАФИК КУРЬЕРОВ (дата -> количество курьеров) YYYY-MM-DD
+# ==========================================================
 SCHEDULE_BY_DATE = {
     "2026-01-15": 5,
     "2026-01-16": 7,
@@ -25,20 +31,79 @@ SCHEDULE_BY_DATE = {
     "2026-01-30": 8,
     "2026-01-31": 6,
 }
-
 DEFAULT_COURIERS = 5
 
 
+# =========================
+# UI (ANSI) styling
+# =========================
+def supports_ansi() -> bool:
+    if not sys.stdout.isatty():
+        return False
+    # Windows Terminal / modern consoles usually support ANSI
+    # We'll assume OK; if user wants, can turn off by env var NO_COLOR
+    if os.getenv("NO_COLOR"):
+        return False
+    return True
+
+
+ANSI = supports_ansi()
+
+def c(s: str, code: str) -> str:
+    if not ANSI:
+        return s
+    return f"\033[{code}m{s}\033[0m"
+
+def bold(s: str) -> str: return c(s, "1")
+def dim(s: str) -> str: return c(s, "2")
+def red(s: str) -> str: return c(s, "31")
+def green(s: str) -> str: return c(s, "32")
+def yellow(s: str) -> str: return c(s, "33")
+def cyan(s: str) -> str: return c(s, "36")
+def gray(s: str) -> str: return c(s, "90")
+
 def clear_console():
-    # Windows: cls, Linux/Mac: clear
     os.system("cls" if os.name == "nt" else "clear")
 
 
+def box(title: str, lines: list[str]) -> str:
+    t = f" {title} "
+    w = max(len(strip_ansi(t)), *(len(strip_ansi(x)) for x in lines), 20)
+    top = "┌" + "─" * (w + 2) + "┐"
+    mid = "│ " + pad(t, w) + " │"
+    sep = "├" + "─" * (w + 2) + "┤"
+    body = "\n".join("│ " + pad(x, w) + " │" for x in lines)
+    bot = "└" + "─" * (w + 2) + "┘"
+    return "\n".join([top, mid, sep, body, bot])
+
+def strip_ansi(s: str) -> str:
+    # tiny stripper for width calc
+    out = []
+    i = 0
+    while i < len(s):
+        if s[i] == "\033" and i + 1 < len(s) and s[i+1] == "[":
+            # skip until 'm'
+            j = i + 2
+            while j < len(s) and s[j] != "m":
+                j += 1
+            i = j + 1
+            continue
+        out.append(s[i])
+        i += 1
+    return "".join(out)
+
+def pad(s: str, w: int) -> str:
+    n = w - len(strip_ansi(s))
+    return s + (" " * max(0, n))
+
+
+# =========================
+# Core math
+# =========================
 def last_day_of_month(d: datetime.date) -> datetime.date:
     if d.month == 12:
         return datetime.date(d.year + 1, 1, 1) - datetime.timedelta(days=1)
     return datetime.date(d.year, d.month + 1, 1) - datetime.timedelta(days=1)
-
 
 def pick_target(current_percent: float) -> int:
     for t in TARGET_PERCENTS:
@@ -46,12 +111,11 @@ def pick_target(current_percent: float) -> int:
             return t
     return 100
 
-
 def min_positive_needed_strict(total: int, positive: int, target_percent: int):
     """
-    Минимальное x >= 0, чтобы:
-        100*(positive + x) > target_percent*(total + x)
-    Строго ">" и только целые.
+    Minimal x >= 0 such that:
+        100*(positive + x) > target*(total + x)
+    integer strict.
     """
     if target_percent >= 100:
         if positive == total:
@@ -60,16 +124,12 @@ def min_positive_needed_strict(total: int, positive: int, target_percent: int):
 
     A = 100 - target_percent
     B = target_percent * total - 100 * positive
-
     if B < 0:
         return 0
-
     return (B // A) + 1
-
 
 def get_couriers_for_date(d: datetime.date) -> int:
     return int(SCHEDULE_BY_DATE.get(d.isoformat(), DEFAULT_COURIERS))
-
 
 def build_day_plan(today: datetime.date):
     end = last_day_of_month(today)
@@ -80,11 +140,10 @@ def build_day_plan(today: datetime.date):
         cur += datetime.timedelta(days=1)
     return out
 
-
-def allocate_weighted_total(total_needed: int, day_plan: list):
+def allocate_weighted_total(total_needed: int, day_plan: list[tuple[datetime.date, int]]):
     """
-    Распределяем total_needed по дням пропорционально числу курьеров.
-    Возвращает dict date -> allocated_total_for_day
+    Distribute base total_needed across days proportional to couriers count.
+    Returns dict date -> allocated base for day.
     """
     if total_needed <= 0:
         return {d: 0 for d, _ in day_plan}
@@ -95,9 +154,8 @@ def allocate_weighted_total(total_needed: int, day_plan: list):
         return {d: 0 for d, _ in day_plan}
 
     alloc = {}
-    remainders = []
-    allocated_sum = 0
-
+    rema = []
+    s = 0
     for d, w in weights:
         if w == 0:
             alloc[d] = 0
@@ -105,39 +163,30 @@ def allocate_weighted_total(total_needed: int, day_plan: list):
         exact = total_needed * (w / total_weight)
         base = int(math.floor(exact))
         alloc[d] = base
-        allocated_sum += base
-        remainders.append((d, exact - base))
+        s += base
+        rema.append((d, exact - base))
 
-    remaining = total_needed - allocated_sum
-    remainders.sort(key=lambda x: x[1], reverse=True)
-
+    remaining = total_needed - s
+    rema.sort(key=lambda x: x[1], reverse=True)
     i = 0
-    while remaining > 0 and i < len(remainders):
-        d, _ = remainders[i]
-        alloc[d] += 1
+    while remaining > 0 and i < len(rema):
+        alloc[rema[i][0]] += 1
         remaining -= 1
         i += 1
-
     i = 0
-    while remaining > 0 and remainders:
-        d, _ = remainders[i % len(remainders)]
-        alloc[d] += 1
+    while remaining > 0 and rema:
+        alloc[rema[i % len(rema)][0]] += 1
         remaining -= 1
         i += 1
 
     return alloc
 
 
-def fmt_int(n: int) -> str:
-    return f"{n:d}"
-
-
-def print_header(title: str):
-    print("\n" + title)
-    print("-" * len(title))
-
-
+# =========================
+# Program
+# =========================
 def calculate():
+    # Input phase (no styling needed)
     print("=" * 60)
     print("ЦЕЛИ ПО ОЦЕНКАМ ДЛЯ КУРЬЕРОВ")
     print("=" * 60)
@@ -145,7 +194,6 @@ def calculate():
     try:
         total = int(input("Всего оценок сейчас: ").strip())
         positive = int(input("Положительных из них: ").strip())
-
         if total < 0 or positive < 0 or positive > total:
             print("Ошибка: positive должен быть в диапазоне [0..total].")
             return
@@ -153,7 +201,7 @@ def calculate():
         current_percent = (positive / total * 100) if total > 0 else 0.0
         target = pick_target(current_percent)
 
-        # 100% недостижимо при наличии негатива — автосдвиг на 99
+        # 100% недостижимо если уже есть негатив
         if target == 100 and positive < total:
             target = 99
 
@@ -162,74 +210,100 @@ def calculate():
             print("Цель 100% недостижима при наличии негатива.")
             return
 
-        total_needed = 0 if needed_positive == 0 else math.ceil(needed_positive / (1.0 - NEG_RISK))
+        # базовое "с запасом 15%" — сколько всего оценок собрать, чтобы ожидать нужные позитивные
+        base_total_needed = 0 if needed_positive == 0 else math.ceil(needed_positive / (1.0 - NEG_RISK))
 
         today = datetime.date.today()
-        day_plan = build_day_plan(today)
-        allocated_by_day = allocate_weighted_total(total_needed, day_plan)
+        day_plan = build_day_plan(today)  # [(date, couriers), ...]
+        base_alloc = allocate_weighted_total(base_total_needed, day_plan)
 
-        # после ввода всех данных — чистим консоль
+        # Теперь добавляем +3 на каждого курьера в каждый день
+        # Это реальная прибавка к плану, а не “красиво в выводе”
+        final_alloc = {}
+        extra_total = 0
+        for d, ccount in day_plan:
+            base = base_alloc.get(d, 0)
+            extra = (EXTRA_PER_COURIER * ccount) if ccount > 0 else 0
+            final_alloc[d] = base + extra
+            extra_total += extra
+
+        final_total_needed = base_total_needed + extra_total
+
+        # Clean console after all inputs collected
         clear_console()
 
-        # ======= СТИЛИЗОВАННЫЙ ВЫВОД =======
+        # ========= Styled output =========
+        title = bold(cyan("ОТЧЁТ ПО ЦЕЛЯМ"))
+        print(title)
+        print(gray("─" * 60))
 
-        # Сводка
-        print("=" * 60)
-        print("РЕЗУЛЬТАТ")
-        print("=" * 60)
+        # Summary box
+        status_lines = [
+            f"{bold('Сейчас:')} {positive}/{total} = {current_percent:.2f}%",
+            f"{bold('Цель:')}  > {target}%",
+            f"{bold('Риск:')}  {int(NEG_RISK*100)}% (запас)",
+            f"{bold('Плюс к плану:')} +{EXTRA_PER_COURIER} на курьера/день",
+            "",
+            f"{bold('Нужно позитивных минимум:')} {needed_positive}",
+            f"{bold('План собрать всего (с запасом):')} {base_total_needed}",
+            f"{bold('Дополнительно из-за +3:')} {extra_total}",
+            f"{bold('ИТОГО план собрать:')} {final_total_needed}",
+        ]
+        print(box("Сводка", status_lines))
 
-        print_header("Сводка")
-        print(f"Сейчас: {positive}/{total} = {current_percent:.2f}%")
-        print(f"Цель:  > {target}%")
-        print(f"Риск:  {int(NEG_RISK*100)}% (запас)")
-        print(f"Нужно позитивных минимум: {fmt_int(needed_positive)}")
-        print(f"Собрать всего оценок:     {fmt_int(total_needed)}")
-
-        # Сегодня
+        # Today box
         today_couriers = get_couriers_for_date(today)
-        today_total = allocated_by_day.get(today, 0)
-        today_per = math.ceil(today_total / today_couriers) if today_couriers > 0 and today_total > 0 else 0
+        today_total = final_alloc.get(today, 0)
+        today_per = math.ceil(today_total / today_couriers) if today_couriers > 0 else 0
 
-        print_header("Сегодня")
-        print(f"Дата:     {today.isoformat()}")
-        print(f"Курьеров: {fmt_int(today_couriers)}")
-        print(f"Всего:    {fmt_int(today_total)}")
-        print(f"На 1:     {fmt_int(today_per)}")
+        badge = green("OK") if today_per >= EXTRA_PER_COURIER else yellow("CHECK")
+        today_lines = [
+            f"{bold('Дата:')}     {today.isoformat()}",
+            f"{bold('Курьеров:')} {today_couriers}",
+            f"{bold('Всего:')}    {today_total}",
+            f"{bold('На 1:')}     {today_per}  {dim(f'({badge})')}",
+        ]
+        print(box("Сегодня", today_lines))
 
-        # План по дням (только где есть курьеры и есть задача)
-        print_header("План по дням (только рабочие)")
-        # Заголовок колонок
-        print(f"{'Дата':<12} {'Курьеров':>8} {'Всего':>8} {'На 1':>8}")
-        print(f"{'-'*12} {'-'*8:>8} {'-'*8:>8} {'-'*8:>8}")
+        # Plan table (only working days)
+        print(bold("План по дням (только рабочие дни)"))
+        header = f"{gray('Дата'.ljust(12))} {gray('Курьеров'.rjust(8))} {gray('Всего'.rjust(8))} {gray('На 1'.rjust(8))}"
+        print(header)
+        print(gray("─" * 60))
 
         shown = 0
-        distributed_sum = 0
-        for d, c in day_plan:
-            day_total = allocated_by_day.get(d, 0)
-            if c <= 0:
-                continue
-            if day_total <= 0:
-                # убираем “воду”: не показываем нулевые задачи
+        dist_sum = 0
+        for d, ccount in day_plan:
+            if ccount <= 0:
                 continue
 
-            per = math.ceil(day_total / c)
-            distributed_sum += day_total
+            day_total = final_alloc.get(d, 0)
+            # если вдруг 0 (редко), пропускаем
+            if day_total <= 0:
+                continue
+
+            per = math.ceil(day_total / ccount)
+            dist_sum += day_total
             shown += 1
-            marker = "*" if d == today else " "
-            print(f"{d.isoformat():<12}{marker} {c:>8} {day_total:>8} {per:>8}")
+
+            mark = cyan("•") if d == today else " "
+            print(f"{d.isoformat():<12} {mark} {ccount:>8} {day_total:>8} {per:>8}")
 
         if shown == 0:
-            print("(Нет рабочих дней с задачами — либо уже всё достигнуто, либо total_needed=0.)")
+            print(dim("Нет рабочих дней с задачами (возможно, цель уже достигнута)."))
 
-        print_header("Контроль")
-        print(f"Распределено: {fmt_int(distributed_sum)} из {fmt_int(total_needed)}")
+        # Control
+        print(gray("─" * 60))
+        ok = (dist_sum == final_total_needed)
+        ctrl = green("СХОДИТСЯ") if ok else red("НЕ СХОДИТСЯ")
+        print(f"{bold('Контроль:')} распределено {dist_sum} из {final_total_needed} → {ctrl}")
 
     except ValueError:
         print("Ошибка: введи числа.")
     except Exception as e:
         print(f"Ошибка: {e}")
 
-    print("\n" + "=" * 60)
+    print("\n" + gray("─" * 60))
     input("Enter для выхода...")
 
 
