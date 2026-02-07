@@ -47,7 +47,7 @@ def is_windows() -> bool:
 def prepare_windows_utf8():
     """
     Делает вывод предсказуемым в cmd/exe:
-    - кодировка UTF-8 (чтобы русские символы не ломались)
+    - кодировка UTF-8
     - stdout/stderr в UTF-8
     """
     if not is_windows():
@@ -58,7 +58,7 @@ def prepare_windows_utf8():
         pass
 
     try:
-        # Python 3.7+
+        
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
@@ -228,10 +228,10 @@ def print_centered_hr(content_width: int, window_width: int, char: str = "-"):
 
 
 # -------------------------
-# ASCII boxes/tables (НЕ Unicode, чтобы ничего не "ехало")
+# ASCII boxes/tables
 # -------------------------
 def ascii_box_lines(title: str, lines: list[str]) -> list[str]:
-    # key/value строки уже выровняем снаружи — здесь просто обрамление
+    
     title_txt = f" {title} "
     inner_w = max(len(title_txt), *(len(strip_ansi(x)) for x in lines), 28)
 
@@ -411,7 +411,7 @@ def calculate():
         today_total = final_alloc.get(today, 0)
         today_pc = per_courier_text(today_total, today_couriers)
 
-        # Собираем таблицу
+        # Таблица
         table_rows = []
         for d, ccount in day_plan:
             if ccount <= 0:
@@ -434,7 +434,7 @@ def calculate():
         table_box = ascii_table_box(table_rows, aligns, headers)
 
         # Боксы
-        # Делаем красивое key:value выравнивание внутри: ключи одинаковой ширины
+        
         kv = [
             ("Оценок всего", str(total)),
             ("Положительных оценок", str(positive)),
@@ -465,7 +465,7 @@ def calculate():
         plan_lines = [f"{pad(k + ':', plan_key_w + 1)} {v}" for k, v in plan_kv]
         plan_box = ascii_box_lines("План", plan_lines)
 
-        # Узнаем реальную ширину контента и если надо — расширим окно
+       
         content_w = max(block_width(main_box), block_width(plan_box), block_width(table_box), 60)
         need_cols = min(max(WINDOW_COLS, content_w + 6), 220)  # защитный потолок
         if is_windows() and need_cols > WINDOW_COLS:
@@ -487,7 +487,7 @@ def calculate():
         for line in center_block(table_box, need_cols):
             print(line)
 
-        # НИЖНЮЮ СВЕРКУ УБРАЛИ (как ты просил)
+        
         print()
         print_centered_hr(content_w, need_cols)
         print()
