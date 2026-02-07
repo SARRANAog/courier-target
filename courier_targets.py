@@ -46,7 +46,6 @@ def is_windows() -> bool:
 
 def prepare_windows_utf8():
     """
-    Делает вывод предсказуемым в cmd/exe:
     - кодировка UTF-8
     - stdout/stderr в UTF-8
     """
