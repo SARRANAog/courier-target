@@ -10,7 +10,7 @@ NEG_RISK = 0.15
 TARGET_PERCENTS = [90, 93, 95, 96, 97, 98, 99, 100]
 EXTRA_PER_COURIER = 3
 
-# Окно по умолчанию (скролл НЕ ограничиваем)
+# Окно по умолчанию
 WINDOW_COLS = 140
 WINDOW_ROWS = 50
 WINDOW_TITLE = "Courier Ratings Targets"
